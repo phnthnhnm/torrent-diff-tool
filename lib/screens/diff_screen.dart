@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../torrent_service.dart';
@@ -19,33 +22,79 @@ class _DiffScreenState extends State<DiffScreen> {
 
   String? _oldPath;
   String? _newPath;
+  String? _inlineErrorMessage;
 
   List<String> _addedFiles = [];
   List<String> _removedFiles = [];
   bool _hasCompared = false;
 
-  Future<void> _pickFile(bool isOld) async {
+  Future<void> _pickNewFile() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['torrent'],
     );
 
-    if (result != null) {
+    if (result == null) return;
+    final newPath = result.files.single.path;
+    if (newPath == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final dataFolder = prefs.getString('data_folder');
+    if (dataFolder == null) {
       setState(() {
-        if (isOld) {
-          _oldPath = result.files.single.path;
-        } else {
-          _newPath = result.files.single.path;
-        }
+        _newPath = newPath;
+        _oldPath = null;
+        _inlineErrorMessage = 'Data folder not set in Settings';
       });
+      return;
     }
+
+    final fileName = Uri.file(newPath).pathSegments.last;
+    final candidate = dataFolder + Platform.pathSeparator + fileName;
+    final exists = await File(candidate).exists();
+    if (!exists) {
+      setState(() {
+        _newPath = newPath;
+        _oldPath = null;
+        _inlineErrorMessage = 'No matching old torrent found in data folder';
+      });
+      return;
+    }
+
+    setState(() {
+      _newPath = newPath;
+      _oldPath = candidate;
+      _inlineErrorMessage = null;
+    });
   }
 
   Future<void> _processDiff() async {
-    if (_oldPath == null || _newPath == null) return;
+    if (_newPath == null) return;
+
+    // Ensure data folder and old path still valid
+    final prefs = await SharedPreferences.getInstance();
+    final dataFolder = prefs.getString('data_folder');
+    if (dataFolder == null) {
+      setState(() {
+        _oldPath = null;
+        _inlineErrorMessage = 'Data folder not set in Settings';
+      });
+      return;
+    }
+
+    final fileName = Uri.file(_newPath!).pathSegments.last;
+    final candidate = dataFolder + Platform.pathSeparator + fileName;
+    final exists = await File(candidate).exists();
+    if (!exists) {
+      setState(() {
+        _oldPath = null;
+        _inlineErrorMessage = 'No matching old torrent found in data folder';
+      });
+      return;
+    }
 
     try {
-      final oldFiles = await _torrentService.getFilesFromTorrent(_oldPath!);
+      final oldFiles = await _torrentService.getFilesFromTorrent(candidate);
       final newFiles = await _torrentService.getFilesFromTorrent(_newPath!);
 
       final result = _torrentService.compare(oldFiles, newFiles);
@@ -54,6 +103,8 @@ class _DiffScreenState extends State<DiffScreen> {
         _addedFiles = result['added']!;
         _removedFiles = result['removed']!;
         _hasCompared = true;
+        _oldPath = candidate;
+        _inlineErrorMessage = null;
       });
     } catch (e) {
       if (mounted) {
@@ -98,23 +149,21 @@ class _DiffScreenState extends State<DiffScreen> {
         child: Column(
           children: [
             // --- Input Section ---
-            FileRow(
-              label: "Old Torrent",
-              path: _oldPath,
-              onPick: () => _pickFile(true),
-            ),
-            const SizedBox(height: 10),
-            FileRow(
-              label: "New Torrent",
-              path: _newPath,
-              onPick: () => _pickFile(false),
-            ),
+            FileRow(label: "New Torrent", path: _newPath, onPick: _pickNewFile),
+            const SizedBox(height: 6),
+            if (_inlineErrorMessage != null)
+              Text(
+                _inlineErrorMessage!,
+                style: const TextStyle(color: Colors.red),
+              ),
+            if (_oldPath != null)
+              Text(
+                'Using old torrent: ${_oldPath != null ? Uri.file(_oldPath!).pathSegments.last : ''}',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
             const SizedBox(height: 20),
-
             ElevatedButton.icon(
-              onPressed: (_oldPath != null && _newPath != null)
-                  ? _processDiff
-                  : null,
+              onPressed: (_newPath != null) ? _processDiff : null,
               icon: const Icon(Icons.compare_arrows),
               label: const Text("Compare Torrents"),
               style: ElevatedButton.styleFrom(

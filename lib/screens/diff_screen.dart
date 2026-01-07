@@ -1,10 +1,13 @@
 import 'dart:io';
 
+import 'package:dtorrent_parser/dtorrent_parser.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../services/qbittorrent_service.dart';
 import '../torrent_service.dart';
 import '../widgets/file_row.dart';
 import '../widgets/result_list.dart';
@@ -68,6 +71,98 @@ class _DiffScreenState extends State<DiffScreen> {
     });
   }
 
+  Future<void> _openInQbittorrent() async {
+    if (_newPath == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final host = prefs.getString('qbt_host');
+    final portStr = prefs.getString('qbt_port');
+    final username = prefs.getString('qbt_username') ?? '';
+    final password = prefs.getString('qbt_password') ?? '';
+    final useHttps = prefs.getBool('qbt_use_https') ?? false;
+
+    if (host == null || portStr == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('qBittorrent settings not configured')),
+        );
+      }
+      return;
+    }
+
+    final port = int.tryParse(portStr) ?? 8080;
+
+    final qb = QBittorrentService();
+    try {
+      await qb.login(host, port, useHttps, username, password);
+
+      final bytes = await File(_newPath!).readAsBytes();
+      await qb.addTorrentBytes(host, port, useHttps, bytes, paused: true);
+
+      final torrent = await Torrent.parseFromFile(_newPath!);
+      final name = torrent.name;
+
+      String? hash;
+      for (var i = 0; i < 8; i++) {
+        final list = await qb.getTorrents(host, port, useHttps);
+        final found = list.firstWhere(
+          (t) => t['name'] == name,
+          orElse: () => {},
+        );
+        if (found.isNotEmpty) {
+          hash = found['hash'] as String?;
+          break;
+        }
+        await Future.delayed(const Duration(seconds: 1));
+      }
+
+      if (hash == null)
+        throw Exception('Could not find torrent in qBittorrent');
+
+      final files = await qb.getTorrentFiles(host, port, useHttps, hash);
+      final allIds = files.map((f) => f['index'].toString()).join('|');
+
+      // Deselect everything
+      if (allIds.isNotEmpty) {
+        await qb.setFilePriority(host, port, useHttps, hash, allIds, 0);
+      }
+
+      // Select added files (match by basename or suffix to handle path differences)
+      final idsToKeep = <String>[];
+      for (var f in files) {
+        final qbName = f['name'] as String;
+        final qbBase = p.basename(qbName);
+        final matched = _addedFiles.any((added) {
+          final addedBase = p.basename(added);
+          return addedBase == qbBase || added.endsWith(qbName) || qbName.endsWith(addedBase);
+        });
+        if (matched) idsToKeep.add(f['index'].toString());
+      }
+      if (idsToKeep.isNotEmpty) {
+        await qb.setFilePriority(
+          host,
+          port,
+          useHttps,
+          hash,
+          idsToKeep.join('|'),
+          1,
+        );
+      }
+
+      await qb.startTorrents(host, port, useHttps, hash);
+
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Torrent added to qBittorrent')),
+        );
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('qBittorrent error: $e')));
+    }
+  }
+
   Future<void> _processDiff() async {
     if (_newPath == null) return;
 
@@ -119,7 +214,7 @@ class _DiffScreenState extends State<DiffScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Comic Torrent Differ"),
+        title: const Text("Torrent Diff Tool"),
         actions: [
           IconButton(
             icon: const Icon(Icons.bug_report),
@@ -183,6 +278,18 @@ class _DiffScreenState extends State<DiffScreen> {
                     )
                   : const Center(child: Text("Select files to see changes")),
             ),
+            if (_hasCompared && _addedFiles.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 12.0),
+                child: ElevatedButton.icon(
+                  onPressed: _openInQbittorrent,
+                  icon: const Icon(Icons.open_in_new),
+                  label: const Text('Open in qBittorrent (select added files)'),
+                  style: ElevatedButton.styleFrom(
+                    minimumSize: const Size(double.infinity, 48),
+                  ),
+                ),
+              ),
           ],
         ),
       ),

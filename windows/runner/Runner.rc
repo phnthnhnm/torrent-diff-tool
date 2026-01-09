@@ -90,7 +90,7 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.phanthanhnam" "\0"
-            VALUE "FileDescription", "tdt" "\0"
+            VALUE "FileDescription", "Torrent Diff Tool" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "tdt" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.phanthanhnam. All rights reserved." "\0"
